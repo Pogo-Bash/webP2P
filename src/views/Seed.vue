@@ -142,44 +142,41 @@ async function handleMessage(peerId: string, message: Message) {
   switch (message.type) {
     case 'HELLO':
       console.log(`[Seed] HELLO from ${peerId}`, message)
-      console.log(`[Seed] fileMeta in message:`, message.fileMeta)
-      console.log(`[Seed] current fileMeta:`, fileMeta.value)
-      console.log(`[Seed] chunksAvailable in message:`, message.chunksAvailable)
       webrtc?.updatePeerStatus(peerId, 'active')
 
       // If they sent file meta, save it
-      if (message.fileMeta && !fileMeta.value) {
-        fileMeta.value = message.fileMeta
-        await opfs.saveFileMeta(fileId.value, message.fileMeta)
-
-        // Calculate our part info
-        const meta = message.fileMeta
-        const chunksPerPart = Math.ceil(meta.totalChunks / meta.totalParts)
-        partInfo.value = {
-          fileId: fileId.value,
-          partIndex: partIndex.value,
-          totalParts: meta.totalParts,
-          chunkStart: partIndex.value * chunksPerPart,
-          chunkEnd: Math.min(partIndex.value * chunksPerPart + chunksPerPart - 1, meta.totalChunks - 1)
+      if (message.fileMeta) {
+        if (!fileMeta.value) {
+          fileMeta.value = message.fileMeta
+          await opfs.saveFileMeta(fileId.value, message.fileMeta)
         }
 
-        // Request our chunks
+        // Calculate our part info if we don't have it
+        if (!partInfo.value) {
+          const meta = message.fileMeta
+          const chunksPerPart = Math.ceil(meta.totalChunks / meta.totalParts)
+          partInfo.value = {
+            fileId: fileId.value,
+            partIndex: partIndex.value,
+            totalParts: meta.totalParts,
+            chunkStart: partIndex.value * chunksPerPart,
+            chunkEnd: Math.min(partIndex.value * chunksPerPart + chunksPerPart - 1, meta.totalChunks - 1)
+          }
+        }
+      }
+
+      // Always check if we need chunks from this peer
+      if (partInfo.value && message.chunksAvailable) {
         const neededChunks: number[] = []
         for (let i = partInfo.value.chunkStart; i <= partInfo.value.chunkEnd; i++) {
-          if (!chunks.value.has(i)) {
+          if (!chunks.value.has(i) && message.chunksAvailable.includes(i)) {
             neededChunks.push(i)
           }
         }
 
-        console.log(`[Seed] Part range: ${partInfo.value.chunkStart} - ${partInfo.value.chunkEnd}`)
-        console.log(`[Seed] Already have chunks:`, Array.from(chunks.value.keys()))
-        console.log(`[Seed] Need chunks:`, neededChunks)
-
         if (neededChunks.length > 0) {
-          console.log(`[Seed] Requesting ${neededChunks.length} chunks from ${peerId}`)
+          console.log(`[Seed] Requesting chunks from ${peerId}:`, neededChunks)
           webrtc?.requestChunks(peerId, neededChunks)
-        } else {
-          console.log(`[Seed] No chunks needed, already have all`)
         }
       }
       break
