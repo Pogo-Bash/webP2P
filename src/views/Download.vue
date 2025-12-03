@@ -92,14 +92,12 @@ function initializeChunks(total: number) {
 function startDownloading() {
   signaling = useSignaling(fileId.value, {
     onPeerJoined: (peerId) => {
-      console.log(`[Download] Peer joined: ${peerId}`)
       // Let the peer with the "larger" ID initiate to avoid collision
       if (signaling && signaling.peerId.value > peerId) {
         webrtc?.initiateConnection(peerId)
       }
     },
     onPeerLeft: (peerId) => {
-      console.log(`[Download] Peer left: ${peerId}`)
       webrtc?.closePeer(peerId)
     },
     onSignal: (from, signal) => {
@@ -111,9 +109,7 @@ function startDownloading() {
     (to, signal) => signaling?.sendSignal(to, signal),
     {
       onConnected: (peerId) => {
-        console.log(`[Download] WebRTC connected: ${peerId}`)
         isConnecting.value = false
-
         // Send empty HELLO (we have no chunks)
         webrtc?.sendHello(peerId, null, [])
       },
@@ -121,7 +117,6 @@ function startDownloading() {
         handleMessage(peerId, message)
       },
       onDisconnected: (peerId) => {
-        console.log(`[Download] WebRTC disconnected: ${peerId}`)
         // Re-request any chunks that were in flight from this peer
         const peer = webrtc?.peers.value.get(peerId)
         if (peer) {
@@ -142,15 +137,12 @@ function startDownloading() {
 async function handleMessage(peerId: string, message: Message) {
   switch (message.type) {
     case 'HELLO':
-      console.log(`[Download] HELLO from ${peerId}`, message)
       webrtc?.updatePeerStatus(peerId, 'active')
 
-      // Store their available chunks
       if (message.chunksAvailable) {
         webrtc?.updatePeerChunks(peerId, message.chunksAvailable)
       }
 
-      // If they sent file meta, use it
       if (message.fileMeta && !fileMeta.value) {
         fileMeta.value = message.fileMeta
         await opfs.saveFileMeta(fileId.value, message.fileMeta)
@@ -159,16 +151,13 @@ async function handleMessage(peerId: string, message: Message) {
 
       // If we still don't have metadata, send our HELLO to prompt a response
       if (!fileMeta.value) {
-        console.log(`[Download] No metadata yet, sending HELLO to prompt response`)
         webrtc?.sendHello(peerId, null, [])
       }
 
-      // Start downloading
       pump()
       break
 
     case 'CHUNKS_AVAILABLE':
-      console.log(`[Download] Chunks available from ${peerId}:`, message.indices)
       webrtc?.updatePeerChunks(peerId, message.indices)
       pump()
       break
@@ -180,8 +169,6 @@ async function handleMessage(peerId: string, message: Message) {
 }
 
 async function handleChunkReceived(peerId: string, index: number, data: ArrayBuffer) {
-  console.log(`[Download] Received chunk ${index} from ${peerId}`)
-
   const peer = webrtc?.peers.value.get(peerId)
   if (peer) {
     peer.chunksRequested.delete(index)
@@ -200,22 +187,18 @@ async function handleChunkReceived(peerId: string, index: number, data: ArrayBuf
       const isValid = await chunker.verifyChunk(index, decrypted, expectedHash)
 
       if (isValid) {
-        // Store encrypted version (for serving to others later)
         receivedChunks.value.set(index, data)
         await opfs.cacheChunk(fileId.value, 'full', index, data)
         chunkState.status = 'verified'
         chunkState.data = decrypted
       } else {
-        console.error(`[Download] Chunk ${index} failed verification`)
         chunkState.status = 'missing'
       }
-    } catch (err) {
-      console.error(`[Download] Error processing chunk ${index}:`, err)
+    } catch {
       chunkState.status = 'missing'
     }
   }
 
-  // Continue downloading
   pump()
 }
 
@@ -223,10 +206,7 @@ function pump() {
   if (!webrtc || !fileMeta.value) return
 
   // Make sure chunks are initialized
-  if (chunks.value.length === 0) {
-    console.log('[Download] Waiting for chunks to initialize...')
-    return
-  }
+  if (chunks.value.length === 0) return
 
   const requests: Array<{ peerId: string; chunkIndex: number }> = []
 
@@ -235,10 +215,7 @@ function pump() {
     .filter(c => c.status === 'missing')
     .map(c => c.index)
 
-  if (needed.length === 0) {
-    console.log('[Download] All chunks received!')
-    return
-  }
+  if (needed.length === 0) return
 
   // Get available peers sorted by speed (fastest first)
   const availablePeers = [...webrtc.peers.value.entries()]
@@ -274,7 +251,6 @@ function pump() {
   }
 
   for (const [peerId, indices] of byPeer) {
-    console.log(`[Download] Requesting chunks from ${peerId}:`, indices)
     webrtc.requestChunks(peerId, indices)
     totalRequested.value += indices.length
   }
@@ -359,7 +335,6 @@ async function saveFile() {
     a.click()
     URL.revokeObjectURL(url)
   } catch (err) {
-    console.error('Error saving file:', err)
     error.value = 'Failed to save file: ' + (err as Error).message
   }
 }

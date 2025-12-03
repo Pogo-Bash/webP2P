@@ -102,7 +102,6 @@ wss.on('connection', (ws) => {
           }
 
           room.peers.set(id, ws)
-          console.log(`[Signaling] Peer ${id} joined room ${roomId} (${room.peers.size} peers)`)
           break
         }
 
@@ -127,8 +126,8 @@ wss.on('connection', (ws) => {
           break
         }
       }
-    } catch (err) {
-      console.error('[Signaling] Error parsing message:', err)
+    } catch {
+      // Ignore parse errors
     }
   })
 
@@ -136,8 +135,7 @@ wss.on('connection', (ws) => {
     clearInterval(pingInterval)
     cleanup()
   })
-  ws.on('error', (err) => {
-    console.error('[Signaling] WebSocket error:', err)
+  ws.on('error', () => {
     clearInterval(pingInterval)
     cleanup()
   })
@@ -147,9 +145,7 @@ wss.on('connection', (ws) => {
       const room = rooms.get(currentRoom)
       if (room) {
         room.peers.delete(peerId)
-        console.log(`[Signaling] Peer ${peerId} left room ${currentRoom}`)
 
-        // Notify others
         for (const [, peerWs] of room.peers) {
           if (peerWs.readyState === WebSocket.OPEN) {
             peerWs.send(JSON.stringify({ type: 'peer-left', peerId }))
@@ -158,7 +154,6 @@ wss.on('connection', (ws) => {
 
         if (room.peers.size === 0) {
           rooms.delete(currentRoom)
-          console.log(`[Signaling] Room ${currentRoom} deleted (empty)`)
         }
       }
       currentRoom = null

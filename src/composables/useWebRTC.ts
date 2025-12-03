@@ -28,8 +28,6 @@ export function useWebRTC(
   const peers = ref<Map<string, PeerState>>(new Map())
 
   function createPeer(peerId: string, initiator: boolean): PeerState {
-    console.log(`[WebRTC] Creating peer ${peerId}, initiator: ${initiator}`)
-
     const connection = new RTCPeerConnection(RTC_CONFIG)
 
     const peerState: PeerState = {
@@ -52,8 +50,6 @@ export function useWebRTC(
     }
 
     connection.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC] ICE state for ${peerId}: ${connection.iceConnectionState}`)
-
       if (connection.iceConnectionState === 'disconnected' ||
           connection.iceConnectionState === 'failed' ||
           connection.iceConnectionState === 'closed') {
@@ -62,16 +58,13 @@ export function useWebRTC(
       }
     }
 
-    // If initiator, create data channel
     if (initiator) {
       const channel = connection.createDataChannel('transfer', DATA_CHANNEL_OPTIONS)
       setupDataChannel(peerState, channel)
       peerState.channel = channel
     }
 
-    // If not initiator, wait for data channel
     connection.ondatachannel = (event) => {
-      console.log(`[WebRTC] Data channel received from ${peerId}`)
       setupDataChannel(peerState, event.channel)
       peerState.channel = event.channel
     }
@@ -84,27 +77,22 @@ export function useWebRTC(
     channel.binaryType = 'arraybuffer'
 
     channel.onopen = () => {
-      console.log(`[WebRTC] Channel open with ${peer.id}`)
       peer.status = 'handshaking'
       events.onConnected?.(peer.id)
     }
 
     channel.onclose = () => {
-      console.log(`[WebRTC] Channel closed with ${peer.id}`)
       peer.status = 'disconnected'
       events.onDisconnected?.(peer.id)
     }
 
-    channel.onerror = (error) => {
-      console.error(`[WebRTC] Channel error with ${peer.id}:`, error)
+    channel.onerror = () => {
       events.onError?.(peer.id, new Error('DataChannel error'))
     }
 
     channel.onmessage = (event) => {
       try {
-        // Handle binary data (chunks)
         if (event.data instanceof ArrayBuffer) {
-          // First 4 bytes are chunk index (Uint32)
           const view = new DataView(event.data)
           const index = view.getUint32(0)
           const data = event.data.slice(4)
@@ -118,11 +106,10 @@ export function useWebRTC(
           return
         }
 
-        // Handle JSON messages
         const message: Message = JSON.parse(event.data)
         events.onMessage?.(peer.id, message)
-      } catch (err) {
-        console.error(`[WebRTC] Error parsing message from ${peer.id}:`, err)
+      } catch {
+        // Ignore parse errors
       }
     }
   }
@@ -135,7 +122,6 @@ export function useWebRTC(
       await peer.connection.setLocalDescription(offer)
       sendSignal(peerId, offer)
     } catch (err) {
-      console.error(`[WebRTC] Error creating offer for ${peerId}:`, err)
       events.onError?.(peerId, err as Error)
     }
   }
@@ -160,19 +146,16 @@ export function useWebRTC(
         await peer.connection.setLocalDescription(answer)
         sendSignal(from, answer)
       } else if (sdp.type === 'answer') {
-        // Only set answer if we're waiting for one
         if (peer && peer.connection.signalingState === 'have-local-offer') {
           await peer.connection.setRemoteDescription(new RTCSessionDescription(sdp))
-        } else {
-          console.warn(`[WebRTC] Ignoring answer from ${from}, state: ${peer?.connection.signalingState}`)
         }
       }
     } else if ('candidate' in signal) {
       if (peer && peer.connection.signalingState !== 'closed') {
         try {
           await peer.connection.addIceCandidate(new RTCIceCandidate(signal))
-        } catch (err) {
-          console.warn(`[WebRTC] Failed to add ICE candidate:`, err)
+        } catch {
+          // Ignore ICE candidate errors
         }
       }
     }
@@ -181,13 +164,11 @@ export function useWebRTC(
   function sendMessage(peerId: string, message: Message) {
     const peer = peers.value.get(peerId)
     if (!peer?.channel || peer.channel.readyState !== 'open') {
-      console.warn(`[WebRTC] Cannot send to ${peerId}: channel not ready`)
       return false
     }
 
     try {
       if (message.type === 'CHUNK') {
-        // Send binary: 4 bytes index + data
         const header = new ArrayBuffer(4)
         new DataView(header).setUint32(0, message.index)
         const combined = new Uint8Array(4 + message.data.byteLength)
@@ -198,8 +179,7 @@ export function useWebRTC(
         peer.channel.send(JSON.stringify(message))
       }
       return true
-    } catch (err) {
-      console.error(`[WebRTC] Error sending to ${peerId}:`, err)
+    } catch {
       return false
     }
   }

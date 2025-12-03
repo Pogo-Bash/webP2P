@@ -32,9 +32,7 @@ export function useSignaling(roomId: string, events: SignalingEvents = {}) {
       ws.onopen = () => {
         connected.value = true
         reconnectAttempts = 0
-        console.log(`[Signaling] Connected as ${peerId.value}`)
 
-        // Join room
         ws?.send(JSON.stringify({
           type: 'join',
           roomId,
@@ -49,50 +47,39 @@ export function useSignaling(roomId: string, events: SignalingEvents = {}) {
           switch (msg.type) {
             case 'peer-joined':
               peers.value.add(msg.peerId)
-              console.log(`[Signaling] Peer joined: ${msg.peerId}`)
               events.onPeerJoined?.(msg.peerId)
               break
 
             case 'peer-left':
               peers.value.delete(msg.peerId)
-              console.log(`[Signaling] Peer left: ${msg.peerId}`)
               events.onPeerLeft?.(msg.peerId)
               break
 
             case 'signal':
-              console.log(`[Signaling] Signal from ${msg.from}`)
               events.onSignal?.(msg.from, msg.signal)
               break
           }
-        } catch (err) {
-          console.error('[Signaling] Error parsing message:', err)
+        } catch {
+          // Ignore parse errors
         }
       }
 
       ws.onclose = () => {
         connected.value = false
-        console.log('[Signaling] Disconnected')
         attemptReconnect()
       }
 
-      ws.onerror = (err) => {
-        console.error('[Signaling] WebSocket error:', err)
-      }
-    } catch (err) {
-      console.error('[Signaling] Failed to connect:', err)
+      ws.onerror = () => {}
+    } catch {
       attemptReconnect()
     }
   }
 
   function attemptReconnect() {
-    if (reconnectAttempts >= maxReconnectAttempts) {
-      console.log('[Signaling] Max reconnect attempts reached')
-      return
-    }
+    if (reconnectAttempts >= maxReconnectAttempts) return
 
     reconnectAttempts++
     const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
-    console.log(`[Signaling] Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
 
     reconnectTimer = setTimeout(() => {
       connect()

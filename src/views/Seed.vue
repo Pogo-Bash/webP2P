@@ -102,15 +102,12 @@ async function loadCachedData() {
 function startSeeding() {
   signaling = useSignaling(fileId.value, {
     onPeerJoined: (peerId) => {
-      console.log(`[Seed] Peer joined: ${peerId}`)
       connectedPeers.value++
-      // Let the peer with the "larger" ID initiate to avoid collision
       if (signaling && signaling.peerId.value > peerId) {
         webrtc?.initiateConnection(peerId)
       }
     },
     onPeerLeft: (peerId) => {
-      console.log(`[Seed] Peer left: ${peerId}`)
       connectedPeers.value = Math.max(0, connectedPeers.value - 1)
       webrtc?.closePeer(peerId)
     },
@@ -123,19 +120,14 @@ function startSeeding() {
     (to, signal) => signaling?.sendSignal(to, signal),
     {
       onConnected: async (peerId) => {
-        console.log(`[Seed] WebRTC connected: ${peerId}`)
         isConnected.value = true
-
-        // Send HELLO with chunks we have
         const availableChunks = Array.from(chunks.value.keys())
         webrtc?.sendHello(peerId, partInfo.value, availableChunks, fileMeta.value ?? undefined)
       },
       onMessage: (peerId, message) => {
         handleMessage(peerId, message)
       },
-      onDisconnected: (peerId) => {
-        console.log(`[Seed] WebRTC disconnected: ${peerId}`)
-      }
+      onDisconnected: () => {}
     }
   )
 
@@ -145,17 +137,14 @@ function startSeeding() {
 async function handleMessage(peerId: string, message: Message) {
   switch (message.type) {
     case 'HELLO':
-      console.log(`[Seed] HELLO from ${peerId}`, message)
       webrtc?.updatePeerStatus(peerId, 'active')
 
-      // If they sent file meta, save it
       if (message.fileMeta) {
         if (!fileMeta.value) {
           fileMeta.value = message.fileMeta
           await opfs.saveFileMeta(fileId.value, message.fileMeta)
         }
 
-        // Calculate our part info if we don't have it
         if (!partInfo.value) {
           const meta = message.fileMeta
           const chunksPerPart = Math.ceil(meta.totalChunks / meta.totalParts)
@@ -169,7 +158,6 @@ async function handleMessage(peerId: string, message: Message) {
         }
       }
 
-      // Always check if we need chunks from this peer
       if (partInfo.value && message.chunksAvailable) {
         const neededChunks: number[] = []
         for (let i = partInfo.value.chunkStart; i <= partInfo.value.chunkEnd; i++) {
@@ -179,21 +167,16 @@ async function handleMessage(peerId: string, message: Message) {
         }
 
         if (neededChunks.length > 0) {
-          console.log(`[Seed] Requesting chunks from ${peerId}:`, neededChunks)
           webrtc?.requestChunks(peerId, neededChunks)
         }
       }
       break
 
     case 'CHUNK':
-      console.log(`[Seed] Received chunk ${message.index}`)
-
-      // Cache the chunk
       await opfs.cacheChunk(fileId.value, partIndex.value, message.index, message.data)
       chunks.value.set(message.index, message.data)
       cachedChunks.value = Array.from(chunks.value.keys()).sort((a, b) => a - b)
 
-      // Broadcast that we have this chunk
       webrtc?.peers.value.forEach((_, pid) => {
         if (pid !== peerId) {
           const msg: Message = { type: 'CHUNKS_AVAILABLE', indices: [message.index] }
@@ -203,8 +186,6 @@ async function handleMessage(peerId: string, message: Message) {
       break
 
     case 'REQUEST_CHUNKS':
-      console.log(`[Seed] Chunk request from ${peerId}:`, message.indices)
-      // Send requested chunks
       for (const index of message.indices) {
         const data = chunks.value.get(index)
         if (data) {
@@ -215,7 +196,6 @@ async function handleMessage(peerId: string, message: Message) {
       break
 
     case 'DONE':
-      console.log(`[Seed] Peer ${peerId} is done`)
       break
   }
 }

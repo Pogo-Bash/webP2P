@@ -115,8 +115,7 @@ async function generateLinks() {
     startSeeding(meta.id, meta, encrypted)
 
   } catch (err) {
-    console.error('Error processing file:', err)
-    processingStep.value = `Error: ${err}`
+    processingStep.value = `Error: ${(err as Error).message}`
   } finally {
     isProcessing.value = false
   }
@@ -125,15 +124,12 @@ async function generateLinks() {
 function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
   signaling = useSignaling(fileId, {
     onPeerJoined: (peerId) => {
-      console.log(`[Share] Peer joined: ${peerId}`)
       connectedPeers.value++
-      // Let the peer with the "larger" ID initiate to avoid collision
       if (signaling && signaling.peerId.value > peerId) {
         webrtc?.initiateConnection(peerId)
       }
     },
     onPeerLeft: (peerId) => {
-      console.log(`[Share] Peer left: ${peerId}`)
       connectedPeers.value = Math.max(0, connectedPeers.value - 1)
       webrtc?.closePeer(peerId)
     },
@@ -146,17 +142,13 @@ function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
     (to, signal) => signaling?.sendSignal(to, signal),
     {
       onConnected: (peerId) => {
-        console.log(`[Share] WebRTC connected: ${peerId}`)
-        // Send HELLO with all chunks we have
         const allChunks = Array.from({ length: meta.totalChunks }, (_, i) => i)
         webrtc?.sendHello(peerId, null, allChunks, meta)
       },
       onMessage: (peerId, message) => {
         handleMessage(peerId, message, chunks)
       },
-      onDisconnected: (peerId) => {
-        console.log(`[Share] WebRTC disconnected: ${peerId}`)
-      }
+      onDisconnected: () => {}
     }
   )
 
@@ -166,13 +158,10 @@ function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
 function handleMessage(peerId: string, message: Message, chunks: ArrayBuffer[]) {
   switch (message.type) {
     case 'HELLO':
-      console.log(`[Share] HELLO from ${peerId}`)
       webrtc?.updatePeerStatus(peerId, 'active')
       break
 
     case 'REQUEST_CHUNKS':
-      console.log(`[Share] Chunk request from ${peerId}:`, message.indices)
-      // Send requested chunks
       for (const index of message.indices) {
         const chunk = chunks[index]
         if (index >= 0 && index < chunks.length && chunk) {
@@ -183,7 +172,6 @@ function handleMessage(peerId: string, message: Message, chunks: ArrayBuffer[]) 
       break
 
     case 'DONE':
-      console.log(`[Share] Peer ${peerId} is done`)
       break
   }
 }
