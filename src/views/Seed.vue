@@ -104,6 +104,10 @@ function startSeeding() {
     onPeerJoined: (peerId) => {
       console.log(`[Seed] Peer joined: ${peerId}`)
       connectedPeers.value++
+      // Proactively connect to new peers (downloaders)
+      if (!webrtc?.peers.value.has(peerId)) {
+        webrtc?.initiateConnection(peerId)
+      }
     },
     onPeerLeft: (peerId) => {
       console.log(`[Seed] Peer left: ${peerId}`)

@@ -157,6 +157,12 @@ async function handleMessage(peerId: string, message: Message) {
         initializeChunks(message.fileMeta.totalChunks)
       }
 
+      // If we still don't have metadata, send our HELLO to prompt a response
+      if (!fileMeta.value) {
+        console.log(`[Download] No metadata yet, sending HELLO to prompt response`)
+        webrtc?.sendHello(peerId, null, [])
+      }
+
       // Start downloading
       pump()
       break
