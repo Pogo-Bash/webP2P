@@ -7,7 +7,7 @@ import { useOPFS } from '@/composables/useOPFS'
 import { useCrypto } from '@/composables/useCrypto'
 import { useWorkerPool } from '@/composables/useWorkerPool'
 import { parseDownloadLink } from '@/lib/link'
-import { MAX_PARALLEL_PER_PEER, MAX_TOTAL_PARALLEL, CHUNK_SIZE } from '@/lib/constants'
+import { MAX_PARALLEL_PER_PEER, MAX_TOTAL_PARALLEL } from '@/lib/constants'
 import type { FileMeta, ChunkState, Message } from '@/lib/types'
 
 const route = useRoute()
@@ -350,7 +350,8 @@ const progress = computed(() => {
 })
 
 const bytesReceived = computed(() => {
-  return chunks.value.filter(c => c.status === 'verified').length * CHUNK_SIZE
+  if (!fileMeta.value) return 0
+  return chunks.value.filter(c => c.status === 'verified').length * fileMeta.value.chunkSize
 })
 
 const isComplete = computed(() => {
@@ -467,8 +468,50 @@ async function saveFile() {
     const meta = fileMeta.value
     const totalChunks = meta.totalChunks
 
-    // Process chunks in batches to avoid memory pressure
-    // Batch size: process up to 32 chunks at a time (~8MB with 256KB chunks)
+    // Helper to decrypt a single chunk
+    const decryptChunk = async (index: number): Promise<ArrayBuffer> => {
+      const encrypted = await opfs.getChunk(fileId.value, 'full', index)
+      if (!encrypted) throw new Error(`Missing chunk ${index}`)
+
+      const result = await workerPool.decrypt(index, encrypted, keyData.value!.slice(0))
+
+      // Verify hash
+      if (result.hash !== meta.chunkHashes[index]) {
+        throw new Error(`Hash mismatch for chunk ${index}`)
+      }
+
+      return result.decrypted
+    }
+
+    // Try to use File System Access API for true streaming (no memory buildup)
+    if ('showSaveFilePicker' in window) {
+      try {
+        const handle = await (window as unknown as { showSaveFilePicker: (opts: { suggestedName: string }) => Promise<FileSystemFileHandle> }).showSaveFilePicker({
+          suggestedName: meta.name
+        })
+        const writable = await handle.createWritable()
+
+        // Stream chunks directly to file - one at a time to minimize memory
+        for (let i = 0; i < totalChunks; i++) {
+          const decrypted = await decryptChunk(i)
+          await writable.write(decrypted)
+          saveProgress.value = ((i + 1) / totalChunks) * 100
+        }
+
+        await writable.close()
+        connectionStatus.value = 'complete'
+        return
+      } catch (pickerErr) {
+        // User cancelled or API not supported - fall back to blob method
+        if ((pickerErr as Error).name === 'AbortError') {
+          connectionStatus.value = 'complete'
+          return
+        }
+        // Other error - fall through to blob fallback
+      }
+    }
+
+    // Fallback: Process chunks in batches and create blob
     const BATCH_SIZE = 32
     const blobParts: Blob[] = []
 
@@ -476,40 +519,20 @@ async function saveFile() {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, totalChunks)
       const batchPromises: Promise<ArrayBuffer>[] = []
 
-      // Load and decrypt batch in parallel
       for (let i = batchStart; i < batchEnd; i++) {
-        const decryptChunk = async (index: number): Promise<ArrayBuffer> => {
-          const encrypted = await opfs.getChunk(fileId.value, 'full', index)
-          if (!encrypted) throw new Error(`Missing chunk ${index}`)
-
-          const result = await workerPool.decrypt(index, encrypted, keyData.value!.slice(0))
-
-          // Verify hash
-          if (result.hash !== meta.chunkHashes[index]) {
-            throw new Error(`Hash mismatch for chunk ${index}`)
-          }
-
-          return result.decrypted
-        }
         batchPromises.push(decryptChunk(i))
       }
 
-      // Wait for batch to complete
       const batchResults = await Promise.all(batchPromises)
 
-      // Add to blob parts (ordered)
       for (const decrypted of batchResults) {
         blobParts.push(new Blob([decrypted]))
       }
 
-      // Update progress
       saveProgress.value = (batchEnd / totalChunks) * 100
     }
 
-    // Create final blob from parts
     const blob = new Blob(blobParts, { type: meta.mimeType })
-
-    // Download
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
