@@ -26,8 +26,8 @@ function applyTheme() {
 </script>
 
 <template>
-  <label class="swap swap-rotate">
-    <input type="checkbox" :checked="!isDark" @change="toggleTheme" />
+  <label class="swap swap-rotate" aria-label="Theme toggle">
+    <input type="checkbox" :checked="!isDark" @change="toggleTheme" aria-label="Toggle dark mode" />
 
     <!-- sun icon -->
     <svg class="swap-on fill-current w-6 h-6" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
