@@ -10,6 +10,10 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url))
     }
   },
+  // Worker configuration - ensures workers are bundled inline from same origin
+  worker: {
+    format: 'es'
+  },
   server: {
     proxy: {
       // Proxy WebSocket connections to the signaling server

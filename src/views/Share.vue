@@ -26,7 +26,6 @@ const bytesServed = ref(0)
 // Session and encryption
 const sessionId = ref('')
 const fileMeta = ref<FileMeta | null>(null)
-const encryptedChunks = ref<ArrayBuffer[]>([])
 const partInfos = ref<PartInfo[]>([])
 
 // Signaling and WebRTC (initialized after processing)
@@ -66,26 +65,26 @@ async function generateLinks() {
   sessionId.value = generateSessionId()
 
   try {
-    // Step 1: Chunk the file
-    processingStep.value = 'Chunking file...'
-    const { meta, chunks } = await chunker.chunkFile(file.value)
-
-    // Don't create more parts than chunks
-    const actualParts = Math.min(numParts.value, meta.totalChunks)
-
-    // Step 2: Generate encryption key
+    // Step 1: Generate encryption key
     processingStep.value = 'Generating encryption key...'
     const key = await cryptoUtil.generateKey()
     const keyExported = await cryptoUtil.exportKey(key)
 
-    // Step 3: Encrypt all chunks
-    processingStep.value = 'Encrypting chunks...'
-    const encrypted = await cryptoUtil.encryptChunks(key, chunks)
-    encryptedChunks.value = encrypted
+    // Step 2: Chunk, encrypt and cache in parallel using workers
+    // This streams the file through workers and writes directly to OPFS
+    // Memory usage stays constant regardless of file size
+    processingStep.value = 'Processing file with parallel workers...'
+    const { meta } = await chunker.chunkAndEncryptFile(file.value, key)
 
-    // Step 4: Update metadata
+    // Don't create more parts than chunks
+    const actualParts = Math.min(numParts.value, meta.totalChunks)
+
+    // Step 3: Update metadata
     meta.totalParts = actualParts
     fileMeta.value = meta
+
+    // Step 4: Save metadata to OPFS
+    await opfs.saveFileMeta(meta.id, meta)
 
     // Step 5: Assign chunks to parts
     partInfos.value = chunker.assignChunksToParts(meta.totalChunks, actualParts)
@@ -96,23 +95,13 @@ async function generateLinks() {
       generateSeedLink(meta.id, part.partIndex, sessionId.value, keyExported)
     )
 
-    // Step 7: Cache file meta and all chunks locally (we're the origin seeder)
-    processingStep.value = 'Caching to browser...'
-    await opfs.saveFileMeta(meta.id, meta)
-    for (let i = 0; i < encrypted.length; i++) {
-      const chunk = encrypted[i]
-      if (chunk) {
-        await opfs.cacheChunk(meta.id, 'full', i, chunk)
-      }
-    }
-
-    // Step 8: Update store
+    // Step 7: Update store
     transferStore.setFileMeta(meta)
     transferStore.setEncryptionKey(key, keyExported)
 
-    // Step 9: Start signaling to seed
+    // Step 8: Start signaling to seed (chunks are loaded from OPFS on demand)
     processingStep.value = 'Starting seed server...'
-    startSeeding(meta.id, meta, encrypted)
+    startSeeding(meta.id, meta)
 
   } catch (err) {
     processingStep.value = `Error: ${(err as Error).message}`
@@ -121,7 +110,7 @@ async function generateLinks() {
   }
 }
 
-function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
+function startSeeding(fileId: string, meta: FileMeta) {
   signaling = useSignaling(fileId, {
     onPeerJoined: (peerId) => {
       connectedPeers.value++
@@ -146,7 +135,7 @@ function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
         webrtc?.sendHello(peerId, null, allChunks, meta)
       },
       onMessage: (peerId, message) => {
-        handleMessage(peerId, message, chunks)
+        handleMessage(peerId, message, fileId, meta.totalChunks)
       },
       onDisconnected: () => {}
     }
@@ -155,18 +144,21 @@ function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
   signaling.connect()
 }
 
-function handleMessage(peerId: string, message: Message, chunks: ArrayBuffer[]) {
+async function handleMessage(peerId: string, message: Message, fileId: string, totalChunks: number) {
   switch (message.type) {
     case 'HELLO':
       webrtc?.updatePeerStatus(peerId, 'active')
       break
 
     case 'REQUEST_CHUNKS':
+      // Load chunks from OPFS on demand (memory efficient)
       for (const index of message.indices) {
-        const chunk = chunks[index]
-        if (index >= 0 && index < chunks.length && chunk) {
-          webrtc?.sendChunk(peerId, index, chunk)
-          bytesServed.value += chunk.byteLength
+        if (index >= 0 && index < totalChunks) {
+          const chunk = await opfs.getChunk(fileId, 'full', index)
+          if (chunk) {
+            webrtc?.sendChunk(peerId, index, chunk)
+            bytesServed.value += chunk.byteLength
+          }
         }
       }
       break
