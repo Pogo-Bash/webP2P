@@ -143,28 +143,37 @@ export function useWebRTC(
   async function handleSignal(from: string, signal: RTCSessionDescriptionInit | RTCIceCandidateInit) {
     let peer = peers.value.get(from)
 
-    // Check if it's an SDP or ICE candidate
     if ('sdp' in signal) {
       const sdp = signal as RTCSessionDescriptionInit
 
       if (sdp.type === 'offer') {
-        // Received offer, create answer
-        peer = createPeer(from, false)
+        // If peer exists and isn't closed, close it first
+        if (peer && peer.connection.signalingState !== 'closed') {
+          peer.channel?.close()
+          peer.connection.close()
+          peers.value.delete(from)
+        }
 
+        peer = createPeer(from, false)
         await peer.connection.setRemoteDescription(new RTCSessionDescription(sdp))
         const answer = await peer.connection.createAnswer()
         await peer.connection.setLocalDescription(answer)
         sendSignal(from, answer)
       } else if (sdp.type === 'answer') {
-        // Received answer
-        if (peer) {
+        // Only set answer if we're waiting for one
+        if (peer && peer.connection.signalingState === 'have-local-offer') {
           await peer.connection.setRemoteDescription(new RTCSessionDescription(sdp))
+        } else {
+          console.warn(`[WebRTC] Ignoring answer from ${from}, state: ${peer?.connection.signalingState}`)
         }
       }
     } else if ('candidate' in signal) {
-      // ICE candidate
-      if (peer) {
-        await peer.connection.addIceCandidate(new RTCIceCandidate(signal))
+      if (peer && peer.connection.signalingState !== 'closed') {
+        try {
+          await peer.connection.addIceCandidate(new RTCIceCandidate(signal))
+        } catch (err) {
+          console.warn(`[WebRTC] Failed to add ICE candidate:`, err)
+        }
       }
     }
   }
