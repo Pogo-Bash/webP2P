@@ -22,6 +22,17 @@ const MIME_TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
 }
 
+// Validation helpers
+function isNonEmptyString(val: unknown, maxLen = 50): val is string {
+  return typeof val === 'string' && val.length > 0 && val.length <= maxLen
+}
+
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  return typeof val === 'object' && val !== null && !Array.isArray(val)
+}
+
+const VALID_MESSAGE_TYPES = ['join', 'signal', 'leave'] as const
+
 // Signaling server state
 interface Room {
   peers: Map<string, WebSocket>
@@ -84,9 +95,20 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(data.toString())
 
+      // Validate message type
+      if (!isPlainObject(msg) || !VALID_MESSAGE_TYPES.includes(msg.type as typeof VALID_MESSAGE_TYPES[number])) {
+        return
+      }
+
       switch (msg.type) {
         case 'join': {
-          const { roomId, id } = msg
+          // Validate roomId and id
+          if (!isNonEmptyString(msg.roomId) || !isNonEmptyString(msg.id)) {
+            return
+          }
+          const roomId = msg.roomId
+          const id = msg.id
+
           peerId = id
           currentRoom = roomId
 
@@ -106,12 +128,19 @@ wss.on('connection', (ws) => {
         }
 
         case 'signal': {
-          const { to, signal } = msg
+          // Validate to and signal
+          if (!isNonEmptyString(msg.to) || !isPlainObject(msg.signal)) {
+            return
+          }
+          const to = msg.to
+          const signal = msg.signal
+
           if (!currentRoom) break
 
           const room = rooms.get(currentRoom)
           const targetWs = room?.peers.get(to)
           if (targetWs && targetWs.readyState === WebSocket.OPEN) {
+            // Only forward sanitized fields
             targetWs.send(JSON.stringify({
               type: 'signal',
               from: peerId,
