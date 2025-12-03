@@ -17,8 +17,11 @@ const chunker = useChunker()
 
 const fileId = ref('')
 const encryptionKey = ref('')
-const isConnecting = ref(true)
 const error = ref('')
+
+// Connection status management
+type ConnectionStatus = 'searching' | 'partial' | 'ready' | 'stalled' | 'no-peers' | 'complete' | 'error'
+const connectionStatus = ref<ConnectionStatus>('searching')
 
 const fileMeta = ref<FileMeta | null>(null)
 const chunks = ref<ChunkState[]>([])
@@ -32,6 +35,12 @@ let webrtc: ReturnType<typeof useWebRTC> | null = null
 // Download tracking
 const totalRequested = ref(0)
 
+// Timeout and stall detection
+const PEER_SEARCH_TIMEOUT = 12000 // 12 seconds to find peers
+const STALL_TIMEOUT = 30000 // 30 seconds without progress = stalled
+let peerSearchTimer: ReturnType<typeof setTimeout> | null = null
+let stallTimer: ReturnType<typeof setTimeout> | null = null
+
 onMounted(async () => {
   fileId.value = route.params.fileId as string
 
@@ -40,8 +49,8 @@ onMounted(async () => {
   const parsed = parseDownloadLink(fullUrl)
 
   if (!parsed) {
-    error.value = 'Invalid link format'
-    isConnecting.value = false
+    error.value = 'This link may be expired or invalid'
+    connectionStatus.value = 'error'
     return
   }
 
@@ -50,9 +59,9 @@ onMounted(async () => {
   // Import the encryption key
   try {
     decryptionKey.value = await cryptoUtil.importKey(encryptionKey.value)
-  } catch (err) {
-    error.value = 'Invalid encryption key'
-    isConnecting.value = false
+  } catch {
+    error.value = 'This link may be expired or invalid'
+    connectionStatus.value = 'error'
     return
   }
 
@@ -78,6 +87,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (peerSearchTimer) clearTimeout(peerSearchTimer)
+  if (stallTimer) clearTimeout(stallTimer)
   signaling?.disconnect()
   webrtc?.closeAll()
 })
@@ -90,8 +101,21 @@ function initializeChunks(total: number) {
 }
 
 function startDownloading() {
+  // Start peer search timeout
+  peerSearchTimer = setTimeout(() => {
+    if (connectionStatus.value === 'searching') {
+      connectionStatus.value = 'no-peers'
+    }
+  }, PEER_SEARCH_TIMEOUT)
+
   signaling = useSignaling(fileId.value, {
     onPeerJoined: (peerId) => {
+      // Clear the no-peers timeout since we found someone
+      if (peerSearchTimer) {
+        clearTimeout(peerSearchTimer)
+        peerSearchTimer = null
+      }
+
       // Let the peer with the "larger" ID initiate to avoid collision
       if (signaling && signaling.peerId.value > peerId) {
         webrtc?.initiateConnection(peerId)
@@ -99,6 +123,7 @@ function startDownloading() {
     },
     onPeerLeft: (peerId) => {
       webrtc?.closePeer(peerId)
+      updateConnectionStatus()
     },
     onSignal: (from, signal) => {
       webrtc?.handleSignal(from, signal)
@@ -109,9 +134,9 @@ function startDownloading() {
     (to, signal) => signaling?.sendSignal(to, signal),
     {
       onConnected: (peerId) => {
-        isConnecting.value = false
         // Send empty HELLO (we have no chunks)
         webrtc?.sendHello(peerId, null, [])
+        updateConnectionStatus()
       },
       onMessage: (peerId, message) => {
         handleMessage(peerId, message)
@@ -126,12 +151,57 @@ function startDownloading() {
             }
           })
         }
+        updateConnectionStatus()
         pump()
       }
     }
   )
 
   signaling.connect()
+}
+
+function updateConnectionStatus() {
+  // Don't update if already complete or errored
+  if (connectionStatus.value === 'complete' || connectionStatus.value === 'error') {
+    return
+  }
+
+  const activePeers = connectedPeers.value.length
+
+  if (activePeers === 0) {
+    // Check if we ever had peers
+    if (connectionStatus.value !== 'searching') {
+      connectionStatus.value = 'no-peers'
+    }
+    return
+  }
+
+  // Check if we have all chunks available from connected peers
+  if (chunks.value.length > 0) {
+    const allAvailable = hasAllChunksAvailable.value
+    if (allAvailable) {
+      connectionStatus.value = 'ready'
+    } else {
+      connectionStatus.value = 'partial'
+    }
+  } else {
+    // No metadata yet, but we have peers
+    connectionStatus.value = 'ready'
+  }
+}
+
+function resetStallTimer() {
+  if (stallTimer) clearTimeout(stallTimer)
+
+  stallTimer = setTimeout(() => {
+    // Only mark as stalled if we're actively downloading and not complete
+    if (connectionStatus.value === 'ready' || connectionStatus.value === 'partial') {
+      const verified = chunks.value.filter(c => c.status === 'verified').length
+      if (verified > 0 && verified < chunks.value.length) {
+        connectionStatus.value = 'stalled'
+      }
+    }
+  }, STALL_TIMEOUT)
 }
 
 async function handleMessage(peerId: string, message: Message) {
@@ -154,11 +224,13 @@ async function handleMessage(peerId: string, message: Message) {
         webrtc?.sendHello(peerId, null, [])
       }
 
+      updateConnectionStatus()
       pump()
       break
 
     case 'CHUNKS_AVAILABLE':
       webrtc?.updatePeerChunks(peerId, message.indices)
+      updateConnectionStatus()
       pump()
       break
 
@@ -191,6 +263,15 @@ async function handleChunkReceived(peerId: string, index: number, data: ArrayBuf
         await opfs.cacheChunk(fileId.value, 'full', index, data)
         chunkState.status = 'verified'
         chunkState.data = decrypted
+
+        // Reset stall timer on successful chunk
+        resetStallTimer()
+
+        // Check if complete
+        if (isComplete.value) {
+          connectionStatus.value = 'complete'
+          if (stallTimer) clearTimeout(stallTimer)
+        }
       } else {
         chunkState.status = 'missing'
       }
@@ -280,6 +361,61 @@ const combinedSpeed = computed(() => {
   return total
 })
 
+// Compute which chunks are available from all connected peers
+const allAvailableChunks = computed(() => {
+  const available = new Set<number>()
+  connectedPeers.value.forEach(p => {
+    p.chunksAvailable.forEach(c => available.add(c))
+  })
+  return available
+})
+
+// Check if all chunks we need are available from connected peers
+const hasAllChunksAvailable = computed(() => {
+  if (chunks.value.length === 0) return false
+  return chunks.value.every(c =>
+    c.status === 'verified' || allAvailableChunks.value.has(c.index)
+  )
+})
+
+// Get missing chunk indices (not verified and not available from peers)
+const missingChunkIndices = computed(() => {
+  return chunks.value
+    .filter(c => c.status !== 'verified' && !allAvailableChunks.value.has(c.index))
+    .map(c => c.index)
+})
+
+// Availability percentage
+const availabilityPercent = computed(() => {
+  if (chunks.value.length === 0) return 0
+  const availableOrVerified = chunks.value.filter(c =>
+    c.status === 'verified' || allAvailableChunks.value.has(c.index)
+  ).length
+  return (availableOrVerified / chunks.value.length) * 100
+})
+
+// Status message for display
+const statusMessage = computed(() => {
+  switch (connectionStatus.value) {
+    case 'searching':
+      return 'Looking for peers...'
+    case 'no-peers':
+      return 'No one is sharing this file. Ask the sender to reopen their link.'
+    case 'partial':
+      return `Incomplete — ${availabilityPercent.value.toFixed(0)}% available. Waiting for more seeders.`
+    case 'stalled':
+      return 'Transfer stalled — peers may have disconnected'
+    case 'ready':
+      return `Found ${connectedPeers.value.length} peer(s)`
+    case 'complete':
+      return 'Download complete!'
+    case 'error':
+      return error.value
+    default:
+      return ''
+  }
+})
+
 function formatSize(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let unitIndex = 0
@@ -350,20 +486,57 @@ async function saveFile() {
       </div>
 
       <!-- Error State -->
-      <div v-if="error" class="alert alert-error mb-6">
+      <div v-if="connectionStatus === 'error'" class="alert alert-error mb-6">
         <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
-        <span>{{ error }}</span>
+        <span>{{ statusMessage }}</span>
       </div>
 
-      <!-- Loading State -->
-      <div v-else-if="isConnecting" class="text-center py-12">
+      <!-- Searching for Peers State -->
+      <div v-else-if="connectionStatus === 'searching'" class="text-center py-12">
         <span class="loading loading-spinner loading-lg"></span>
-        <p class="mt-4 opacity-70">Connecting to peers...</p>
+        <p class="mt-4 opacity-70">{{ statusMessage }}</p>
+      </div>
+
+      <!-- No Peers Found State -->
+      <div v-else-if="connectionStatus === 'no-peers'" class="card bg-base-100 shadow-xl mb-6">
+        <div class="card-body text-center">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 mx-auto opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636a9 9 0 010 12.728m-2.829-2.829a5 5 0 000-7.07m-4.243 4.243a1 1 0 111.414-1.414 1 1 0 01-1.414 1.414z" />
+          </svg>
+          <h2 class="text-xl font-semibold mt-4">No seeders online</h2>
+          <p class="opacity-70 mt-2">{{ statusMessage }}</p>
+        </div>
       </div>
 
       <template v-else>
+        <!-- Status Banner -->
+        <div
+          v-if="connectionStatus === 'partial'"
+          class="alert alert-warning mb-6"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <div>
+            <div class="font-semibold">{{ statusMessage }}</div>
+            <div v-if="missingChunkIndices.length > 0" class="text-sm opacity-80">
+              Missing {{ missingChunkIndices.length }} chunk(s) — waiting for seeder with these parts
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-else-if="connectionStatus === 'stalled'"
+          class="alert alert-error mb-6"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>{{ statusMessage }}</span>
+        </div>
+
         <!-- File Info & Progress -->
         <div class="card bg-base-100 shadow-xl mb-6">
           <div class="card-body">
@@ -379,6 +552,19 @@ async function saveFile() {
               <progress
                 class="progress progress-primary w-full"
                 :value="progress"
+                max="100"
+              />
+            </div>
+
+            <!-- Availability indicator when partial -->
+            <div v-if="connectionStatus === 'partial' && chunks.length > 0" class="mt-2">
+              <div class="flex justify-between text-sm opacity-70">
+                <span>Available from peers</span>
+                <span>{{ availabilityPercent.toFixed(0) }}%</span>
+              </div>
+              <progress
+                class="progress progress-warning w-full h-1"
+                :value="availabilityPercent"
                 max="100"
               />
             </div>
