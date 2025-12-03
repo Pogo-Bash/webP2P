@@ -93,8 +93,10 @@ function startDownloading() {
   signaling = useSignaling(fileId.value, {
     onPeerJoined: (peerId) => {
       console.log(`[Download] Peer joined: ${peerId}`)
-      // Initiate connection to the new peer
-      webrtc?.initiateConnection(peerId)
+      // Only initiate if we don't already have a connection to this peer
+      if (!webrtc?.peers.value.has(peerId)) {
+        webrtc?.initiateConnection(peerId)
+      }
     },
     onPeerLeft: (peerId) => {
       console.log(`[Download] Peer left: ${peerId}`)
@@ -213,6 +215,12 @@ async function handleChunkReceived(peerId: string, index: number, data: ArrayBuf
 
 function pump() {
   if (!webrtc || !fileMeta.value) return
+
+  // Make sure chunks are initialized
+  if (chunks.value.length === 0) {
+    console.log('[Download] Waiting for chunks to initialize...')
+    return
+  }
 
   const requests: Array<{ peerId: string; chunkIndex: number }> = []
 
