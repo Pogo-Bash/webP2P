@@ -5,7 +5,7 @@ import { useSignaling } from '@/composables/useSignaling'
 import { useWebRTC, type PeerState } from '@/composables/useWebRTC'
 import { useOPFS } from '@/composables/useOPFS'
 import { useCrypto } from '@/composables/useCrypto'
-import { useChunker } from '@/composables/useChunker'
+import { useWorkerPool } from '@/composables/useWorkerPool'
 import { parseDownloadLink } from '@/lib/link'
 import { MAX_PARALLEL_PER_PEER, MAX_TOTAL_PARALLEL, CHUNK_SIZE } from '@/lib/constants'
 import type { FileMeta, ChunkState, Message } from '@/lib/types'
@@ -13,20 +13,21 @@ import type { FileMeta, ChunkState, Message } from '@/lib/types'
 const route = useRoute()
 const opfs = useOPFS()
 const cryptoUtil = useCrypto()
-const chunker = useChunker()
+const workerPool = useWorkerPool()
 
 const fileId = ref('')
 const encryptionKey = ref('')
 const error = ref('')
 
 // Connection status management
-type ConnectionStatus = 'searching' | 'partial' | 'ready' | 'stalled' | 'no-peers' | 'complete' | 'error'
+type ConnectionStatus = 'searching' | 'partial' | 'ready' | 'stalled' | 'no-peers' | 'complete' | 'saving' | 'error'
 const connectionStatus = ref<ConnectionStatus>('searching')
 
 const fileMeta = ref<FileMeta | null>(null)
 const chunks = ref<ChunkState[]>([])
-const receivedChunks = ref<Map<number, ArrayBuffer>>(new Map())
+// Note: We no longer store chunks in memory - they go directly to OPFS
 const decryptionKey = ref<CryptoKey | null>(null)
+const keyData = ref<ArrayBuffer | null>(null) // Raw key for workers
 
 // Signaling and WebRTC
 let signaling: ReturnType<typeof useSignaling> | null = null
@@ -34,6 +35,7 @@ let webrtc: ReturnType<typeof useWebRTC> | null = null
 
 // Download tracking
 const totalRequested = ref(0)
+const saveProgress = ref(0)
 
 // Timeout and stall detection
 const PEER_SEARCH_TIMEOUT = 12000 // 12 seconds to find peers
@@ -59,11 +61,16 @@ onMounted(async () => {
   // Import the encryption key
   try {
     decryptionKey.value = await cryptoUtil.importKey(encryptionKey.value)
+    // Export raw key for workers
+    keyData.value = await crypto.subtle.exportKey('raw', decryptionKey.value)
   } catch {
     error.value = 'This link may be expired or invalid'
     connectionStatus.value = 'error'
     return
   }
+
+  // Initialize worker pool for parallel decryption
+  await workerPool.init()
 
   // Check for cached data
   const cachedMeta = await opfs.getFileMeta(fileId.value)
@@ -71,12 +78,10 @@ onMounted(async () => {
     fileMeta.value = cachedMeta
     initializeChunks(cachedMeta.totalChunks)
 
-    // Load any cached chunks
+    // Mark any cached chunks as verified (don't load into memory)
     const cachedIndices = await opfs.getCachedChunkIndices(fileId.value, 'full')
     for (const index of cachedIndices) {
-      const data = await opfs.getChunk(fileId.value, 'full', index)
-      if (data && chunks.value[index]) {
-        receivedChunks.value.set(index, data)
+      if (chunks.value[index]) {
         chunks.value[index].status = 'verified'
       }
     }
@@ -91,6 +96,7 @@ onUnmounted(() => {
   if (stallTimer) clearTimeout(stallTimer)
   signaling?.disconnect()
   webrtc?.closeAll()
+  workerPool.terminate()
 })
 
 function initializeChunks(total: number) {
@@ -247,22 +253,22 @@ async function handleChunkReceived(peerId: string, index: number, data: ArrayBuf
     peer.bytesReceived += data.byteLength
   }
 
-  // Verify the chunk hash if we have metadata
-  if (fileMeta.value && decryptionKey.value) {
+  // Verify the chunk hash if we have metadata and key
+  if (fileMeta.value && keyData.value) {
     const expectedHash = fileMeta.value.chunkHashes[index]
     const chunkState = chunks.value[index]
     if (!expectedHash || !chunkState) return
 
     try {
-      // Decrypt and verify
-      const decrypted = await cryptoUtil.decryptChunk(decryptionKey.value, data)
-      const isValid = await chunker.verifyChunk(index, decrypted, expectedHash)
+      // Decrypt using worker (off main thread) and verify hash
+      const result = await workerPool.decrypt(index, data, keyData.value.slice(0))
 
-      if (isValid) {
-        receivedChunks.value.set(index, data)
+      // Worker returns hash of decrypted data
+      if (result.hash === expectedHash) {
+        // Store encrypted data in OPFS (not in memory)
         await opfs.cacheChunk(fileId.value, 'full', index, data)
         chunkState.status = 'verified'
-        chunkState.data = decrypted
+        // Note: We don't store decrypted data - it will be decrypted again at save time
 
         // Reset stall timer on successful chunk
         resetStallTimer()
@@ -407,6 +413,8 @@ const statusMessage = computed(() => {
       return 'Transfer stalled — peers may have disconnected'
     case 'ready':
       return `Found ${connectedPeers.value.length} peer(s)`
+    case 'saving':
+      return `Preparing file... ${saveProgress.value.toFixed(0)}%`
     case 'complete':
       return 'Download complete!'
     case 'error':
@@ -450,28 +458,69 @@ function getStatusClass(peer: PeerState): string {
 }
 
 async function saveFile() {
-  if (!fileMeta.value || !decryptionKey.value) return
+  if (!fileMeta.value || !keyData.value) return
+
+  connectionStatus.value = 'saving'
+  saveProgress.value = 0
 
   try {
-    // Decrypt all chunks
-    const decryptedChunks = new Map<number, ArrayBuffer>()
-    for (const [index, data] of receivedChunks.value) {
-      const decrypted = await cryptoUtil.decryptChunk(decryptionKey.value, data)
-      decryptedChunks.set(index, decrypted)
+    const meta = fileMeta.value
+    const totalChunks = meta.totalChunks
+
+    // Process chunks in batches to avoid memory pressure
+    // Batch size: process up to 32 chunks at a time (~8MB with 256KB chunks)
+    const BATCH_SIZE = 32
+    const blobParts: Blob[] = []
+
+    for (let batchStart = 0; batchStart < totalChunks; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, totalChunks)
+      const batchPromises: Promise<ArrayBuffer>[] = []
+
+      // Load and decrypt batch in parallel
+      for (let i = batchStart; i < batchEnd; i++) {
+        const decryptChunk = async (index: number): Promise<ArrayBuffer> => {
+          const encrypted = await opfs.getChunk(fileId.value, 'full', index)
+          if (!encrypted) throw new Error(`Missing chunk ${index}`)
+
+          const result = await workerPool.decrypt(index, encrypted, keyData.value!.slice(0))
+
+          // Verify hash
+          if (result.hash !== meta.chunkHashes[index]) {
+            throw new Error(`Hash mismatch for chunk ${index}`)
+          }
+
+          return result.decrypted
+        }
+        batchPromises.push(decryptChunk(i))
+      }
+
+      // Wait for batch to complete
+      const batchResults = await Promise.all(batchPromises)
+
+      // Add to blob parts (ordered)
+      for (const decrypted of batchResults) {
+        blobParts.push(new Blob([decrypted]))
+      }
+
+      // Update progress
+      saveProgress.value = (batchEnd / totalChunks) * 100
     }
 
-    // Assemble file
-    const blob = await chunker.assembleFile(fileMeta.value, decryptedChunks)
+    // Create final blob from parts
+    const blob = new Blob(blobParts, { type: meta.mimeType })
 
     // Download
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = fileMeta.value.name
+    a.download = meta.name
     a.click()
     URL.revokeObjectURL(url)
+
+    connectionStatus.value = 'complete'
   } catch (err) {
     error.value = 'Failed to save file: ' + (err as Error).message
+    connectionStatus.value = 'error'
   }
 }
 </script>
@@ -631,8 +680,21 @@ async function saveFile() {
           </div>
         </div>
 
+        <!-- Saving State -->
+        <div v-if="connectionStatus === 'saving'" class="card bg-info text-info-content shadow-xl">
+          <div class="card-body">
+            <h3 class="font-semibold">{{ statusMessage }}</h3>
+            <progress
+              class="progress progress-primary w-full mt-2"
+              :value="saveProgress"
+              max="100"
+            />
+            <p class="text-sm opacity-80 mt-2">Decrypting and assembling file...</p>
+          </div>
+        </div>
+
         <!-- Complete Actions -->
-        <div v-if="isComplete" class="card bg-success text-success-content shadow-xl">
+        <div v-else-if="isComplete" class="card bg-success text-success-content shadow-xl">
           <div class="card-body">
             <h3 class="font-semibold">Download Complete!</h3>
             <div class="flex gap-3 mt-4">
