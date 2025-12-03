@@ -23,6 +23,10 @@ const processingStep = ref('')
 const connectedPeers = ref(0)
 const bytesServed = ref(0)
 
+// Copy feedback state (-1 = none, -2 = all copied, 0+ = specific link index)
+const copiedIndex = ref(-1)
+let copyTimeout: ReturnType<typeof setTimeout> | null = null
+
 // Session and encryption
 const sessionId = ref('')
 const fileMeta = ref<FileMeta | null>(null)
@@ -168,12 +172,18 @@ async function handleMessage(peerId: string, message: Message, fileId: string, t
   }
 }
 
-async function copyLink(link: string) {
+async function copyLink(link: string, index: number) {
   await navigator.clipboard.writeText(link)
+  copiedIndex.value = index
+  if (copyTimeout) clearTimeout(copyTimeout)
+  copyTimeout = setTimeout(() => { copiedIndex.value = -1 }, 2000)
 }
 
 async function copyAllLinks() {
   await navigator.clipboard.writeText(generatedLinks.value.join('\n'))
+  copiedIndex.value = -2
+  if (copyTimeout) clearTimeout(copyTimeout)
+  copyTimeout = setTimeout(() => { copiedIndex.value = -1 }, 2000)
 }
 
 // Warn before leaving
@@ -263,7 +273,7 @@ onUnmounted(() => {
           <div class="flex justify-between items-center mb-4">
             <h3 class="font-semibold">Share Links</h3>
             <button class="btn btn-sm btn-ghost" @click="copyAllLinks">
-              Copy All
+              {{ copiedIndex === -2 ? 'Copied!' : 'Copy All' }}
             </button>
           </div>
 
@@ -279,8 +289,8 @@ onUnmounted(() => {
             >
               <div class="badge badge-primary">Part {{ index + 1 }}</div>
               <code class="flex-1 text-xs truncate">{{ link }}</code>
-              <button class="btn btn-sm btn-ghost" @click="copyLink(link)">
-                Copy
+              <button class="btn btn-sm btn-ghost" @click="copyLink(link, index)">
+                {{ copiedIndex === index ? 'Copied!' : 'Copy' }}
               </button>
             </div>
           </div>
