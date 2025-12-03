@@ -2,6 +2,17 @@ import { ref } from 'vue'
 import { RTC_CONFIG, DATA_CHANNEL_OPTIONS } from '@/lib/constants'
 import type { Message, PartInfo, FileMeta } from '@/lib/types'
 
+// Validation helpers
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  return typeof val === 'object' && val !== null && !Array.isArray(val)
+}
+
+function isNumberArray(val: unknown): val is number[] {
+  return Array.isArray(val) && val.every(item => typeof item === 'number')
+}
+
+const VALID_MESSAGE_TYPES = ['HELLO', 'REQUEST_CHUNKS', 'CHUNK', 'HAVE'] as const
+
 export interface PeerState {
   id: string
   connection: RTCPeerConnection
@@ -93,8 +104,15 @@ export function useWebRTC(
     channel.onmessage = (event) => {
       try {
         if (event.data instanceof ArrayBuffer) {
+          // Validate binary chunk: must have at least 4 bytes for index
+          if (event.data.byteLength < 4) return
+
           const view = new DataView(event.data)
           const index = view.getUint32(0)
+
+          // Validate index is a reasonable non-negative integer
+          if (!Number.isInteger(index) || index < 0) return
+
           const data = event.data.slice(4)
 
           const message: Message = {
@@ -106,8 +124,30 @@ export function useWebRTC(
           return
         }
 
-        const message: Message = JSON.parse(event.data)
-        events.onMessage?.(peer.id, message)
+        const msg = JSON.parse(event.data)
+
+        // Validate message structure
+        if (!isPlainObject(msg) || !VALID_MESSAGE_TYPES.includes(msg.type as typeof VALID_MESSAGE_TYPES[number])) {
+          return
+        }
+
+        // Validate specific message types
+        switch (msg.type) {
+          case 'HELLO':
+            if (!isNumberArray(msg.chunksAvailable)) return
+            break
+          case 'REQUEST_CHUNKS':
+            if (!isNumberArray(msg.indices)) return
+            break
+          case 'CHUNK':
+            if (typeof msg.index !== 'number') return
+            break
+          case 'HAVE':
+            if (!isNumberArray(msg.indices)) return
+            break
+        }
+
+        events.onMessage?.(peer.id, msg as Message)
       } catch {
         // Ignore parse errors
       }

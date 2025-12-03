@@ -1,6 +1,16 @@
 import { ref, onUnmounted } from 'vue'
 import { nanoid } from 'nanoid'
-import type { SignalingServerMessage } from '@/lib/types'
+
+// Validation helpers
+function isNonEmptyString(val: unknown): val is string {
+  return typeof val === 'string' && val.length > 0
+}
+
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  return typeof val === 'object' && val !== null && !Array.isArray(val)
+}
+
+const VALID_SERVER_MESSAGE_TYPES = ['peer-joined', 'peer-left', 'signal'] as const
 
 export interface SignalingEvents {
   onPeerJoined?: (peerId: string) => void
@@ -42,21 +52,29 @@ export function useSignaling(roomId: string, events: SignalingEvents = {}) {
 
       ws.onmessage = (event) => {
         try {
-          const msg: SignalingServerMessage = JSON.parse(event.data)
+          const msg = JSON.parse(event.data)
+
+          // Validate message structure
+          if (!isPlainObject(msg) || !VALID_SERVER_MESSAGE_TYPES.includes(msg.type as typeof VALID_SERVER_MESSAGE_TYPES[number])) {
+            return
+          }
 
           switch (msg.type) {
             case 'peer-joined':
+              if (!isNonEmptyString(msg.peerId)) return
               peers.value.add(msg.peerId)
               events.onPeerJoined?.(msg.peerId)
               break
 
             case 'peer-left':
+              if (!isNonEmptyString(msg.peerId)) return
               peers.value.delete(msg.peerId)
               events.onPeerLeft?.(msg.peerId)
               break
 
             case 'signal':
-              events.onSignal?.(msg.from, msg.signal)
+              if (!isNonEmptyString(msg.from) || !isPlainObject(msg.signal)) return
+              events.onSignal?.(msg.from, msg.signal as RTCSessionDescriptionInit | RTCIceCandidateInit)
               break
           }
         } catch {
