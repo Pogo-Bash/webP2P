@@ -141,7 +141,10 @@ function startSeeding() {
 async function handleMessage(peerId: string, message: Message) {
   switch (message.type) {
     case 'HELLO':
-      console.log(`[Seed] HELLO from ${peerId}`)
+      console.log(`[Seed] HELLO from ${peerId}`, message)
+      console.log(`[Seed] fileMeta in message:`, message.fileMeta)
+      console.log(`[Seed] current fileMeta:`, fileMeta.value)
+      console.log(`[Seed] chunksAvailable in message:`, message.chunksAvailable)
       webrtc?.updatePeerStatus(peerId, 'active')
 
       // If they sent file meta, save it
@@ -168,8 +171,15 @@ async function handleMessage(peerId: string, message: Message) {
           }
         }
 
+        console.log(`[Seed] Part range: ${partInfo.value.chunkStart} - ${partInfo.value.chunkEnd}`)
+        console.log(`[Seed] Already have chunks:`, Array.from(chunks.value.keys()))
+        console.log(`[Seed] Need chunks:`, neededChunks)
+
         if (neededChunks.length > 0) {
+          console.log(`[Seed] Requesting ${neededChunks.length} chunks from ${peerId}`)
           webrtc?.requestChunks(peerId, neededChunks)
+        } else {
+          console.log(`[Seed] No chunks needed, already have all`)
         }
       }
       break

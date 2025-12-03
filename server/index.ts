@@ -69,6 +69,17 @@ wss.on('connection', (ws) => {
   let currentRoom: string | null = null
   let peerId: string | null = null
 
+  // Keep connection alive with ping/pong (Codespaces times out idle connections)
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping()
+    }
+  }, 30000)
+
+  ws.on('pong', () => {
+    // Connection is alive
+  })
+
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString())
@@ -121,9 +132,13 @@ wss.on('connection', (ws) => {
     }
   })
 
-  ws.on('close', cleanup)
+  ws.on('close', () => {
+    clearInterval(pingInterval)
+    cleanup()
+  })
   ws.on('error', (err) => {
     console.error('[Signaling] WebSocket error:', err)
+    clearInterval(pingInterval)
     cleanup()
   })
 
