@@ -16,21 +16,31 @@ function onFileSelected(file: File) {
 }
 
 function startDownload(links: string[]) {
-  // Parse the first link to get fileId
-  // For now, just navigate to download view
   const firstLink = links[0]
   if (!firstLink) return
 
-  // Extract fileId from link (simplified for now)
-  const match = firstLink.match(/\/d\/([^#\/]+)/)
-  if (match) {
-    router.push(`/d/${match[1]}`)
-  } else {
-    // Try seed link format
-    const seedMatch = firstLink.match(/\/s\/([^\/]+)/)
-    if (seedMatch) {
-      router.push(`/d/${seedMatch[1]}`)
-    }
+  // Try to parse as seed link first (format: /s/{fileId}/{partIndex}#{sessionId}.{encryptionKey})
+  const seedMatch = firstLink.match(/\/s\/([^\/]+)\/\d+#[^.]+\.(.+)$/)
+  if (seedMatch) {
+    const fileId = seedMatch[1]
+    const encryptionKey = seedMatch[2]
+    router.push(`/d/${fileId}#${encryptionKey}`)
+    showDownloadModal.value = false
+    return
+  }
+
+  // Try download link format (format: /d/{fileId}#{encryptionKey})
+  const downloadMatch = firstLink.match(/\/d\/([^#]+)#(.+)$/)
+  if (downloadMatch) {
+    router.push(`/d/${downloadMatch[1]}#${downloadMatch[2]}`)
+    showDownloadModal.value = false
+    return
+  }
+
+  // Fallback - just try to extract fileId
+  const fallbackMatch = firstLink.match(/\/[sd]\/([^\/]+)/)
+  if (fallbackMatch) {
+    router.push(`/d/${fallbackMatch[1]}`)
   }
   showDownloadModal.value = false
 }
