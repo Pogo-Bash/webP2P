@@ -224,6 +224,7 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
 const progress = computed(() => {
   if (!partInfo.value) return 0
   const totalInPart = partInfo.value.chunkEnd - partInfo.value.chunkStart + 1
+  if (totalInPart <= 0) return 100 // Empty part = already complete
   const cached = cachedChunks.value.filter(
     i => i >= partInfo.value!.chunkStart && i <= partInfo.value!.chunkEnd
   ).length

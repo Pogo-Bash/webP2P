@@ -70,6 +70,9 @@ async function generateLinks() {
     processingStep.value = 'Chunking file...'
     const { meta, chunks } = await chunker.chunkFile(file.value)
 
+    // Don't create more parts than chunks
+    const actualParts = Math.min(numParts.value, meta.totalChunks)
+
     // Step 2: Generate encryption key
     processingStep.value = 'Generating encryption key...'
     const key = await cryptoUtil.generateKey()
@@ -81,11 +84,11 @@ async function generateLinks() {
     encryptedChunks.value = encrypted
 
     // Step 4: Update metadata
-    meta.totalParts = numParts.value
+    meta.totalParts = actualParts
     fileMeta.value = meta
 
     // Step 5: Assign chunks to parts
-    partInfos.value = chunker.assignChunksToParts(meta.totalChunks, numParts.value)
+    partInfos.value = chunker.assignChunksToParts(meta.totalChunks, actualParts)
     partInfos.value.forEach(p => p.fileId = meta.id)
 
     // Step 6: Generate links
