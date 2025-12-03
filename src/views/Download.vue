@@ -61,8 +61,8 @@ onMounted(async () => {
   // Import the encryption key
   try {
     decryptionKey.value = await cryptoUtil.importKey(encryptionKey.value)
-    // Export raw key for workers
-    keyData.value = await crypto.subtle.exportKey('raw', decryptionKey.value)
+    // Decode raw key bytes for workers (key is not extractable, so decode from string)
+    keyData.value = cryptoUtil.decodeKeyData(encryptionKey.value)
   } catch {
     error.value = 'This link may be expired or invalid'
     connectionStatus.value = 'error'

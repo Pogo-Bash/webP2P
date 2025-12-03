@@ -44,6 +44,12 @@ export function useCrypto() {
     )
   }
 
+  // Get raw key bytes from encoded string (for passing to workers)
+  function decodeKeyData(encoded: string): ArrayBuffer {
+    const bytes = base64UrlDecode(encoded)
+    return bytes.buffer as ArrayBuffer
+  }
+
   async function encryptChunk(
     key: CryptoKey,
     chunkIndex: number,
@@ -110,6 +116,7 @@ export function useCrypto() {
     generateKey,
     exportKey,
     importKey,
+    decodeKeyData,
     encryptChunk,
     decryptChunk,
     encryptChunks,
