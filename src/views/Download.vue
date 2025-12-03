@@ -93,8 +93,8 @@ function startDownloading() {
   signaling = useSignaling(fileId.value, {
     onPeerJoined: (peerId) => {
       console.log(`[Download] Peer joined: ${peerId}`)
-      // Only initiate if we don't already have a connection to this peer
-      if (!webrtc?.peers.value.has(peerId)) {
+      // Let the peer with the "larger" ID initiate to avoid collision
+      if (signaling && signaling.peerId.value > peerId) {
         webrtc?.initiateConnection(peerId)
       }
     },

@@ -127,8 +127,8 @@ function startSeeding(fileId: string, meta: FileMeta, chunks: ArrayBuffer[]) {
     onPeerJoined: (peerId) => {
       console.log(`[Share] Peer joined: ${peerId}`)
       connectedPeers.value++
-      // Initiate WebRTC connection if we don't already have one
-      if (!webrtc?.peers.value.has(peerId)) {
+      // Let the peer with the "larger" ID initiate to avoid collision
+      if (signaling && signaling.peerId.value > peerId) {
         webrtc?.initiateConnection(peerId)
       }
     },
